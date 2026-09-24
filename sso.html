@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Conectando à conta Bosch</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f3f5f7;font-family:Arial,Helvetica,sans-serif;color:#202124}
+.box{background:#fff;border:1px solid #d5d9dd;border-radius:6px;padding:28px 32px;max-width:420px;text-align:center;box-shadow:0 5px 18px rgba(0,0,0,.08)}
+.box p{margin:0;font-size:14px;color:#4b5563}
+</style>
+<script src="https://alcdn.msauth.net/browser/2.39.0/js/msal-browser.min.js"></script>
+</head>
+<body>
+<div class="box"><p id="msg">Conectando à sua conta Bosch...</p></div>
+<script>
+(function () {
+  // Pagina de login do Checklist de Integracao (HRS3-LA).
+  // So devolve o token para o checklist do n8n -- nunca para outro endereco.
+  var VOLTA = 'https://i1-d.n8n.bosch.com/webhook/checklist-integracao';
+  var SCOPES = ['openid', 'profile', 'email'];
+
+  function voltar(uid, hash) {
+    location.replace(VOLTA + '?uid=' + encodeURIComponent(uid || '') + '#' + hash);
+  }
+  function uidValido(u) { return /^[0-9a-f-]{8,64}$/i.test(u || ''); }
+
+  if (!window.msal) {
+    document.getElementById('msg').textContent = 'Não foi possível carregar o login da Microsoft. Recarregue a página.';
+    return;
+  }
+
+  var app = new msal.PublicClientApplication({
+    auth: {
+      clientId: 'fec1b92c-ccd2-41dd-a651-4103a9e55280',
+      authority: 'https://login.microsoftonline.com/0ae51e19-07c8-4e4b-bb6d-648ee58410f4',
+      redirectUri: location.origin + location.pathname,
+      navigateToLoginRequestUrl: false
+    },
+    cache: { cacheLocation: 'sessionStorage' }
+  });
+
+  function concluir(r, uid) {
+    uid = uid || (r && r.state) || '';
+    if (!uidValido(uid)) { document.getElementById('msg').textContent = 'Link inválido.'; return; }
+    if (!r || !r.accessToken) { voltar(uid, 'sso_erro=' + encodeURIComponent('token não recebido')); return; }
+    var conta = r.account || {};
+    var claims = r.idTokenClaims || conta.idTokenClaims || {};
+    var exp = r.expiresOn ? new Date(r.expiresOn).getTime() : '';
+    voltar(uid,
+      'sso=' + encodeURIComponent(r.accessToken) +
+      '&nome=' + encodeURIComponent(conta.name || claims.name || '') +
+      '&email=' + encodeURIComponent(claims.email || conta.username || '') +
+      '&exp=' + exp);
+  }
+
+  var qs = new URLSearchParams(location.search);
+  var uid = qs.get('uid') || '';
+  var trocar = qs.get('trocar') === '1';
+
+  app.handleRedirectPromise().then(function (resp) {
+    if (resp) return concluir(resp, resp.state);
+    if (!uidValido(uid)) { document.getElementById('msg').textContent = 'Link inválido.'; return; }
+
+    var conta = app.getAllAccounts()[0];
+    var login = function () {
+      var req = { scopes: SCOPES, state: uid };
+      if (trocar) req.prompt = 'select_account';
+      return app.loginRedirect(req);
+    };
+    if (conta && !trocar) {
+      return app.acquireTokenSilent({ scopes: SCOPES, account: conta })
+        .then(function (r) { concluir(r, uid); })
+        .catch(login);
+    }
+    return login();
+  }).catch(function (e) {
+    var det = (e && (e.errorCode || e.name)) || 'erro';
+    if (uidValido(uid)) voltar(uid, 'sso_erro=' + encodeURIComponent(det));
+    else document.getElementById('msg').textContent = 'Erro no login: ' + det;
+  });
+})();
+</script>
+</body>
+</html>
