@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Conectando à conta Bosch</title>
+<title>Checklist de Integração</title>
 <style>
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f3f5f7;font-family:Arial,Helvetica,sans-serif;color:#202124}
 .box{background:#fff;border:1px solid #d5d9dd;border-radius:6px;padding:28px 32px;max-width:420px;text-align:center;box-shadow:0 5px 18px rgba(0,0,0,.08)}
@@ -84,23 +84,33 @@ function(e){return e.hasOwnProperty("tenant_discovery_endpoint")&&e.hasOwnProper
 </script>
 </head>
 <body>
-<div class="box"><p id="msg">Conectando à sua conta Bosch...</p></div>
+<div class="box"><p id="msg">Abrindo o checklist...</p></div>
 <script>
 (function () {
   // Pagina de login do Checklist de Integracao (HRS3-LA).
+  // Faz o login Microsoft de forma silenciosa e abre o checklist no n8n.
   // So devolve o token para o checklist do n8n -- nunca para outro endereco.
+  if (window !== window.top) return; // nunca roda dentro de iframe
+
   var VOLTA = 'https://i1-d.n8n.bosch.com/webhook/checklist-integracao';
   var SCOPES = ['openid', 'profile', 'email'];
+  var CHAVE_UID = 'hrr_checklist_sso_uid';
+  var MSG_SEM_UID = 'Esta página é aberta automaticamente pelo Checklist de Integração. Abra o link do checklist recebido por e-mail.';
+  var ERROS_SILENCIOSOS = ['login_required', 'interaction_required', 'consent_required', 'account_selection_required'];
+  var hashInicial = location.hash || '';
 
-  function voltar(uid, hash) {
-    location.replace(VOLTA + '?uid=' + encodeURIComponent(uid || '') + '#' + hash);
-  }
+  function msg(t) { document.getElementById('msg').textContent = t; }
   function uidValido(u) { return /^[0-9a-f-]{8,64}$/i.test(u || ''); }
-
-  if (!window.msal) {
-    document.getElementById('msg').textContent = 'Não foi possível carregar o login da Microsoft. Recarregue a página.';
-    return;
+  function lerUidSalvo() { try { return sessionStorage.getItem(CHAVE_UID) || ''; } catch (e) { return ''; } }
+  function salvarUid(u) { try { sessionStorage.setItem(CHAVE_UID, u); } catch (e) {} }
+  function voltar(uid, hash) { location.replace(VOLTA + '?uid=' + encodeURIComponent(uid || '') + '#' + hash); }
+  function voltarComErro(uid, codigo) {
+    uid = uid || lerUidSalvo();
+    if (uidValido(uid)) voltar(uid, 'sso_erro=' + encodeURIComponent(codigo));
+    else msg('Erro no login: ' + codigo);
   }
+
+  if (!window.msal) { msg('Não foi possível carregar o login da Microsoft. Recarregue a página.'); return; }
 
   var app = new msal.PublicClientApplication({
     auth: {
@@ -113,9 +123,9 @@ function(e){return e.hasOwnProperty("tenant_discovery_endpoint")&&e.hasOwnProper
   });
 
   function concluir(r, uid) {
-    uid = uid || (r && r.state) || '';
-    if (!uidValido(uid)) { document.getElementById('msg').textContent = 'Link inválido.'; return; }
-    if (!r || !r.accessToken) { voltar(uid, 'sso_erro=' + encodeURIComponent('token não recebido')); return; }
+    uid = uid || (r && r.state) || lerUidSalvo();
+    if (!uidValido(uid)) { msg(MSG_SEM_UID); return; }
+    if (!r || !r.accessToken) { voltarComErro(uid, 'token_nao_recebido'); return; }
     var conta = r.account || {};
     var claims = r.idTokenClaims || conta.idTokenClaims || {};
     var exp = r.expiresOn ? new Date(r.expiresOn).getTime() : '';
@@ -128,28 +138,40 @@ function(e){return e.hasOwnProperty("tenant_discovery_endpoint")&&e.hasOwnProper
 
   var qs = new URLSearchParams(location.search);
   var uid = qs.get('uid') || '';
-  var trocar = qs.get('trocar') === '1';
+  var trocar = qs.get('trocar') === '1';         // "Trocar conta": escolhe a conta
+  var interativo = qs.get('interativo') === '1'; // "Entrar com conta Bosch": login com tela
 
   app.handleRedirectPromise().then(function (resp) {
     if (resp) return concluir(resp, resp.state);
-    if (!uidValido(uid)) { document.getElementById('msg').textContent = 'Link inválido.'; return; }
 
-    var conta = app.getAllAccounts()[0];
-    var login = function () {
-      var req = { scopes: SCOPES, state: uid };
-      if (trocar) req.prompt = 'select_account';
-      return app.loginRedirect(req);
+    // Voltou da Microsoft com erro
+    if (/[#&]error=/.test(hashInicial)) {
+      var p = new URLSearchParams(hashInicial.replace(/^#/, ''));
+      var codigo = p.get('error') || 'erro';
+      voltarComErro(uid, ERROS_SILENCIOSOS.indexOf(codigo) !== -1 ? 'login_necessario' : codigo);
+      return;
+    }
+
+    if (!uidValido(uid)) { msg(MSG_SEM_UID); return; }
+    salvarUid(uid);
+
+    if (trocar) return app.loginRedirect({ scopes: SCOPES, state: uid, prompt: 'select_account' });
+    if (interativo) return app.loginRedirect({ scopes: SCOPES, state: uid });
+
+    // Silencioso: 1) token em cache  2) sessao Microsoft do navegador, sem tela (prompt=none)
+    var silenciosoMicrosoft = function () {
+      return app.loginRedirect({ scopes: SCOPES, state: uid, prompt: 'none' });
     };
-    if (conta && !trocar) {
+    var conta = app.getAllAccounts()[0];
+    if (conta) {
       return app.acquireTokenSilent({ scopes: SCOPES, account: conta })
         .then(function (r) { concluir(r, uid); })
-        .catch(login);
+        .catch(silenciosoMicrosoft);
     }
-    return login();
+    return silenciosoMicrosoft();
   }).catch(function (e) {
-    var det = (e && (e.errorCode || e.name)) || 'erro';
-    if (uidValido(uid)) voltar(uid, 'sso_erro=' + encodeURIComponent(det));
-    else document.getElementById('msg').textContent = 'Erro no login: ' + det;
+    var codigo = (e && (e.errorCode || e.name)) || 'erro';
+    voltarComErro(uid, ERROS_SILENCIOSOS.indexOf(codigo) !== -1 ? 'login_necessario' : codigo);
   });
 })();
 </script>
